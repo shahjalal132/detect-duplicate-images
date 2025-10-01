@@ -13,7 +13,8 @@ if ( !defined( 'ABSPATH' ) ) {
 // Define plugin constants
 define( 'FDI_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FDI_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'FDI_VERSION', '1.3' );
+define( 'FDI_VERSION', '1.4' );
+define( 'FDI_BATCH_SIZE', 100 ); // Process 100 images per batch
 
 // Include helper functions
 require_once FDI_PLUGIN_DIR . 'src/helpers/functions.php';
@@ -35,6 +36,11 @@ class Find_Duplicate_Images_By_Hash {
         add_action( 'admin_menu', [ $this, 'register_admin_page' ] );
         add_action( 'admin_post_delete_orphan_duplicates', [ $this, 'delete_orphan_duplicates' ] );
         add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
+        
+        // AJAX handlers
+        add_action( 'wp_ajax_fdi_start_scan', [ $this, 'ajax_start_scan' ] );
+        add_action( 'wp_ajax_fdi_process_batch', [ $this, 'ajax_process_batch' ] );
+        add_action( 'wp_ajax_fdi_clear_cache', [ $this, 'ajax_clear_cache' ] );
     }
 
     /**
@@ -63,6 +69,14 @@ class Find_Duplicate_Images_By_Hash {
             FDI_VERSION,
             true
         );
+        
+        // Localize script with AJAX data
+        wp_localize_script( 'fdi-admin-scripts', 'fdiAjax', [
+            'ajaxurl'    => admin_url( 'admin-ajax.php' ),
+            'nonce'      => wp_create_nonce( 'fdi_ajax_nonce' ),
+            'batchSize'  => FDI_BATCH_SIZE,
+            'totalItems' => fdi_get_total_attachments_count()
+        ] );
     }
 
     /**
@@ -90,7 +104,11 @@ class Find_Duplicate_Images_By_Hash {
         // Pagination setup
         $current_page = isset( $_GET['paged'] ) ? max( 1, intval( $_GET['paged'] ) ) : 1;
 
-        // Get all duplicates
+        // Get scan status
+        $last_scan_time    = fdi_get_last_scan_time();
+        $total_attachments = fdi_get_total_attachments_count();
+        
+        // Get all duplicates (from cache)
         $duplicates = fdi_get_duplicate_images_by_hash();
 
         // Calculate statistics
@@ -136,6 +154,11 @@ class Find_Duplicate_Images_By_Hash {
                 $deleted_count++;
             }
         }
+        
+        // Clear cache after deletion to refresh results
+        if ( $deleted_count > 0 ) {
+            fdi_clear_cache();
+        }
 
         // Redirect back with success message
         wp_redirect( fdi_get_base_url() . '&deleted=' . $deleted_count );
@@ -174,6 +197,99 @@ class Find_Duplicate_Images_By_Hash {
         }
 
         return $hash;
+    }
+    
+    /**
+     * AJAX: Start scan process
+     */
+    public function ajax_start_scan() {
+        check_ajax_referer( 'fdi_ajax_nonce', 'nonce' );
+        
+        if ( !current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
+        
+        // Clear existing cache and progress
+        fdi_clear_cache();
+        
+        // Get total count
+        $total = fdi_get_total_attachments_count();
+        
+        // Initialize progress
+        fdi_set_scan_progress( [
+            'total'      => $total,
+            'processed'  => 0,
+            'duplicates' => []
+        ] );
+        
+        wp_send_json_success( [
+            'total'   => $total,
+            'message' => 'Scan started'
+        ] );
+    }
+    
+    /**
+     * AJAX: Process a batch of images
+     */
+    public function ajax_process_batch() {
+        check_ajax_referer( 'fdi_ajax_nonce', 'nonce' );
+        
+        if ( !current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
+        
+        $offset = isset( $_POST['offset'] ) ? intval( $_POST['offset'] ) : 0;
+        
+        // Get current progress
+        $progress = fdi_get_scan_progress();
+        if ( !$progress ) {
+            wp_send_json_error( [ 'message' => 'Scan not initialized' ] );
+        }
+        
+        // Process batch
+        $result = fdi_process_batch( $offset, FDI_BATCH_SIZE );
+        
+        // Merge results with existing duplicates
+        $progress['duplicates'] = fdi_merge_batch_results( 
+            $progress['duplicates'], 
+            $result['hashes'] 
+        );
+        $progress['processed'] += $result['processed'];
+        
+        // Update progress
+        fdi_set_scan_progress( $progress );
+        
+        // Check if complete
+        $is_complete = $progress['processed'] >= $progress['total'];
+        
+        if ( $is_complete ) {
+            // Save final results to cache
+            fdi_set_cached_duplicates( $progress['duplicates'], 3600 * 24 ); // Cache for 24 hours
+            fdi_set_last_scan_time();
+        }
+        
+        wp_send_json_success( [
+            'processed'   => $progress['processed'],
+            'total'       => $progress['total'],
+            'complete'    => $is_complete,
+            'duplicates'  => count( $progress['duplicates'] ),
+            'percentage'  => round( ( $progress['processed'] / $progress['total'] ) * 100, 2 )
+        ] );
+    }
+    
+    /**
+     * AJAX: Clear cache and rescan
+     */
+    public function ajax_clear_cache() {
+        check_ajax_referer( 'fdi_ajax_nonce', 'nonce' );
+        
+        if ( !current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
+        
+        fdi_clear_cache();
+        
+        wp_send_json_success( [ 'message' => 'Cache cleared' ] );
     }
 }
 

@@ -8,41 +8,195 @@ if ( !defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Get all duplicate images by file hash
+ * Get cached duplicate images or return false if not cached
  * 
- * @return array Array of duplicate images grouped by hash
+ * @return array|false Array of duplicate images or false if not cached
  */
-function fdi_get_duplicate_images_by_hash() {
+function fdi_get_cached_duplicates() {
+    return get_transient( 'fdi_duplicate_images' );
+}
+
+/**
+ * Set cached duplicate images
+ * 
+ * @param array $duplicates Array of duplicate images
+ * @param int $expiration Cache expiration in seconds (default: 1 hour)
+ */
+function fdi_set_cached_duplicates( $duplicates, $expiration = 3600 ) {
+    set_transient( 'fdi_duplicate_images', $duplicates, $expiration );
+}
+
+/**
+ * Clear cached duplicate images
+ */
+function fdi_clear_cache() {
+    delete_transient( 'fdi_duplicate_images' );
+    delete_transient( 'fdi_scan_progress' );
+    delete_option( 'fdi_last_scan_time' );
+}
+
+/**
+ * Get scan progress
+ * 
+ * @return array Progress data
+ */
+function fdi_get_scan_progress() {
+    return get_transient( 'fdi_scan_progress' );
+}
+
+/**
+ * Set scan progress
+ * 
+ * @param array $progress Progress data
+ */
+function fdi_set_scan_progress( $progress ) {
+    set_transient( 'fdi_scan_progress', $progress, 600 ); // 10 minutes
+}
+
+/**
+ * Get total attachments count
+ * 
+ * @return int Total number of image attachments
+ */
+function fdi_get_total_attachments_count() {
+    global $wpdb;
+    
+    return (int) $wpdb->get_var( "
+        SELECT COUNT(DISTINCT p.ID)
+        FROM {$wpdb->posts} p
+        WHERE p.post_type = 'attachment' 
+          AND p.post_mime_type LIKE 'image%'
+    " );
+}
+
+/**
+ * Get batch of attachments for processing
+ * 
+ * @param int $offset Offset for query
+ * @param int $limit Number of items to fetch
+ * @return array Array of attachment objects
+ */
+function fdi_get_attachments_batch( $offset = 0, $limit = 100 ) {
     global $wpdb;
 
-    $attachments = $wpdb->get_results( "
+    return $wpdb->get_results( $wpdb->prepare( "
         SELECT p.ID, pm.meta_value AS file
         FROM {$wpdb->posts} p
         INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
         WHERE p.post_type = 'attachment' 
-          AND p.post_mime_type LIKE 'image%'
+          AND p.post_mime_type LIKE 'image%%'
           AND pm.meta_key = '_wp_attached_file'
-    " );
+        ORDER BY p.ID ASC
+        LIMIT %d OFFSET %d
+    ", $limit, $offset ) );
+}
 
-    $hashes     = [];
-    $duplicates = [];
-    $upload_dir = wp_get_upload_dir();
+/**
+ * Get or calculate MD5 hash for an attachment
+ * 
+ * @param int $attachment_id Attachment ID
+ * @param string $file_path Full file path
+ * @return string|false MD5 hash or false on failure
+ */
+function fdi_get_attachment_hash( $attachment_id, $file_path ) {
+    // Try to get cached hash from postmeta
+    $cached_hash = get_post_meta( $attachment_id, '_fdi_md5_hash', true );
+    
+    if ( $cached_hash ) {
+        return $cached_hash;
+    }
+    
+    // Calculate hash if file exists
+    if ( file_exists( $file_path ) ) {
+        $hash = md5_file( $file_path );
+        
+        // Cache the hash in postmeta for future use
+        if ( $hash ) {
+            update_post_meta( $attachment_id, '_fdi_md5_hash', $hash );
+        }
+        
+        return $hash;
+    }
+    
+    return false;
+}
+
+/**
+ * Process a batch of attachments and return hash data
+ * 
+ * @param int $offset Starting offset
+ * @param int $limit Batch size
+ * @return array Processed hash data
+ */
+function fdi_process_batch( $offset = 0, $limit = 100 ) {
+    $attachments = fdi_get_attachments_batch( $offset, $limit );
+    $upload_dir  = wp_get_upload_dir();
+    $hashes      = [];
+    $processed   = 0;
 
     foreach ( $attachments as $att ) {
         $file_path = $upload_dir['basedir'] . '/' . $att->file;
-
-        if ( file_exists( $file_path ) ) {
-            $hash = md5_file( $file_path );
-
+        $hash      = fdi_get_attachment_hash( $att->ID, $file_path );
+        
+        if ( $hash ) {
             if ( !isset( $hashes[$hash] ) ) {
-                $hashes[$hash] = [ $att->ID ];
-            } else {
-                $hashes[$hash][]   = $att->ID;
-                $duplicates[$hash] = $hashes[$hash];
+                $hashes[$hash] = [];
             }
+            $hashes[$hash][] = $att->ID;
         }
+        
+        $processed++;
     }
 
+    return [
+        'hashes'    => $hashes,
+        'processed' => $processed
+    ];
+}
+
+/**
+ * Get all duplicate images (from cache or scan)
+ * 
+ * @param bool $force_rescan Force a new scan
+ * @return array Array of duplicate images grouped by hash
+ */
+function fdi_get_duplicate_images_by_hash( $force_rescan = false ) {
+    // Try to get from cache first
+    if ( !$force_rescan ) {
+        $cached = fdi_get_cached_duplicates();
+        if ( $cached !== false ) {
+            return $cached;
+        }
+    }
+    
+    // If no cache, return empty array (user needs to trigger scan)
+    return [];
+}
+
+/**
+ * Merge batch results into existing duplicates data
+ * 
+ * @param array $existing Existing duplicates data
+ * @param array $new_hashes New batch hash data
+ * @return array Merged duplicates
+ */
+function fdi_merge_batch_results( $existing, $new_hashes ) {
+    foreach ( $new_hashes as $hash => $ids ) {
+        if ( !isset( $existing[$hash] ) ) {
+            $existing[$hash] = [];
+        }
+        $existing[$hash] = array_merge( $existing[$hash], $ids );
+    }
+    
+    // Filter to only keep duplicates (more than 1 ID per hash)
+    $duplicates = [];
+    foreach ( $existing as $hash => $ids ) {
+        $unique_ids = array_unique( $ids );
+        if ( count( $unique_ids ) > 1 ) {
+            $duplicates[$hash] = $unique_ids;
+        }
+    }
+    
     return $duplicates;
 }
 
@@ -126,3 +280,18 @@ function fdi_get_base_url() {
     return admin_url( 'tools.php?page=find-duplicate-images' );
 }
 
+/**
+ * Get last scan time
+ * 
+ * @return int|false Timestamp or false if never scanned
+ */
+function fdi_get_last_scan_time() {
+    return get_option( 'fdi_last_scan_time', false );
+}
+
+/**
+ * Set last scan time
+ */
+function fdi_set_last_scan_time() {
+    update_option( 'fdi_last_scan_time', time() );
+}
