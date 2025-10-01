@@ -6,6 +6,7 @@
     'use strict';
 
     let scanInProgress = false;
+    let stopRequested = false;
 
     $(document).ready(function() {
         
@@ -20,15 +21,39 @@
                 return;
             }
             
+            const isResume = $(this).data('resume') === 'true';
+            
             const confirmed = confirm(
-                'This will scan your entire media library for duplicate images.\n\n' +
-                'For large libraries (100k+ images), this may take several minutes.\n\n' +
-                'Continue?'
+                isResume 
+                    ? 'This will resume the scan from where it was stopped.\n\nContinue?'
+                    : 'This will scan your entire media library for duplicate images.\n\n' +
+                      'For large libraries (100k+ images), this may take several minutes.\n\n' +
+                      'You can stop the scan at any time and resume later.\n\nContinue?'
             );
             
             if (!confirmed) return;
             
-            startScan();
+            startScan(isResume);
+        });
+        
+        /**
+         * Stop Scan Button
+         */
+        $('#fdi-stop-scan').on('click', function(e) {
+            e.preventDefault();
+            
+            if (!scanInProgress) {
+                return;
+            }
+            
+            const confirmed = confirm(
+                'Are you sure you want to stop the scan?\n\n' +
+                'Partial results will be saved and you can resume later.'
+            );
+            
+            if (!confirmed) return;
+            
+            stopScan();
         });
         
         /**
@@ -46,15 +71,17 @@
         /**
          * Start the scan process
          */
-        function startScan() {
+        function startScan(isResume = false) {
             scanInProgress = true;
+            stopRequested = false;
             
-            // Disable buttons
-            $('#fdi-start-scan, #fdi-clear-cache').prop('disabled', true);
+            // Toggle button visibility
+            $('#fdi-start-scan, #fdi-clear-cache').prop('disabled', true).hide();
+            $('#fdi-stop-scan').prop('disabled', false).show();
             
             // Show progress bar
             $('#fdi-progress-container').slideDown();
-            updateProgress(0, 'Initializing scan...');
+            updateProgress(0, isResume ? 'Resuming scan...' : 'Initializing scan...');
             
             // Call AJAX to start scan
             $.ajax({
@@ -62,12 +89,22 @@
                 type: 'POST',
                 data: {
                     action: 'fdi_start_scan',
-                    nonce: fdiAjax.nonce
+                    nonce: fdiAjax.nonce,
+                    resume: isResume ? 'true' : 'false'
                 },
                 success: function(response) {
                     if (response.success) {
+                        const startOffset = response.data.processed || 0;
+                        const total = response.data.total;
+                        
+                        // Update progress if resuming
+                        if (response.data.resuming && startOffset > 0) {
+                            const percentage = (startOffset / total) * 100;
+                            updateProgress(percentage, `Resuming from ${startOffset.toLocaleString()} of ${total.toLocaleString()} images...`);
+                        }
+                        
                         // Start processing batches
-                        processBatch(0, response.data.total);
+                        processBatch(startOffset, total);
                     } else {
                         showError(response.data.message || 'Failed to start scan');
                         resetScanState();
@@ -81,9 +118,54 @@
         }
         
         /**
+         * Stop the scan process
+         */
+        function stopScan() {
+            stopRequested = true;
+            $('#fdi-stop-scan').prop('disabled', true).text('⏸️ Stopping...');
+            updateProgress(null, 'Stopping scan and saving progress...');
+            
+            // Call AJAX to stop scan
+            $.ajax({
+                url: fdiAjax.ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'fdi_stop_scan',
+                    nonce: fdiAjax.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        const data = response.data;
+                        updateProgress(
+                            (data.processed / data.total) * 100,
+                            `✓ Scan stopped. Processed ${data.processed.toLocaleString()} of ${data.total.toLocaleString()} images. Found ${data.duplicates} duplicate sets.`
+                        );
+                        
+                        // Reload page after a moment
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 2000);
+                    } else {
+                        showError(response.data.message || 'Failed to stop scan');
+                        resetScanState();
+                    }
+                },
+                error: function() {
+                    showError('Network error while stopping scan.');
+                    resetScanState();
+                }
+            });
+        }
+        
+        /**
          * Process a batch of images
          */
         function processBatch(offset, total) {
+            // Check if stop was requested
+            if (stopRequested) {
+                return; // Stop processing
+            }
+            
             $.ajax({
                 url: fdiAjax.ajaxurl,
                 type: 'POST',
@@ -102,8 +184,13 @@
                         // Update progress
                         updateProgress(
                             percentage,
-                            `Processing ${processed.toLocaleString()} of ${totalItems.toLocaleString()} images... (${percentage}%)`
+                            `Processing ${processed.toLocaleString()} of ${totalItems.toLocaleString()} images... (${percentage}%) - Found ${data.duplicates} duplicate sets`
                         );
+                        
+                        // Check if stop was requested before continuing
+                        if (stopRequested) {
+                            return;
+                        }
                         
                         // Continue with next batch or finish
                         if (data.complete) {
@@ -141,7 +228,9 @@
          * Update progress bar and text
          */
         function updateProgress(percentage, text) {
-            $('#fdi-progress-fill').css('width', percentage + '%');
+            if (percentage !== null) {
+                $('#fdi-progress-fill').css('width', percentage + '%');
+            }
             $('#fdi-progress-text').text(text);
         }
         
@@ -157,7 +246,11 @@
          */
         function resetScanState() {
             scanInProgress = false;
-            $('#fdi-start-scan, #fdi-clear-cache').prop('disabled', false);
+            stopRequested = false;
+            
+            // Reset button visibility
+            $('#fdi-start-scan, #fdi-clear-cache').prop('disabled', false).show();
+            $('#fdi-stop-scan').prop('disabled', false).hide().text('⏸️ Stop Scan');
             
             // Hide progress after delay
             setTimeout(function() {

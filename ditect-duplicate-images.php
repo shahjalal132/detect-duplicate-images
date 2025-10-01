@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Find Duplicate Images by Hash
  * Description: Scan the WordPress Media Library and find duplicate images by file hash (MD5). Includes stats, orphan check, and delete option with a beautiful dashboard.
- * Version: 1.3
+ * Version: 1.5
  * Author: Shah Jalal
  */
 
@@ -13,7 +13,7 @@ if ( !defined( 'ABSPATH' ) ) {
 // Define plugin constants
 define( 'FDI_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FDI_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'FDI_VERSION', '1.4' );
+define( 'FDI_VERSION', '1.5' );
 define( 'FDI_BATCH_SIZE', 100 ); // Process 100 images per batch
 
 // Include helper functions
@@ -40,6 +40,7 @@ class Find_Duplicate_Images_By_Hash {
         // AJAX handlers
         add_action( 'wp_ajax_fdi_start_scan', [ $this, 'ajax_start_scan' ] );
         add_action( 'wp_ajax_fdi_process_batch', [ $this, 'ajax_process_batch' ] );
+        add_action( 'wp_ajax_fdi_stop_scan', [ $this, 'ajax_stop_scan' ] );
         add_action( 'wp_ajax_fdi_clear_cache', [ $this, 'ajax_clear_cache' ] );
     }
 
@@ -107,6 +108,8 @@ class Find_Duplicate_Images_By_Hash {
         // Get scan status
         $last_scan_time    = fdi_get_last_scan_time();
         $total_attachments = fdi_get_total_attachments_count();
+        $is_scan_stopped   = fdi_is_scan_stopped();
+        $scan_progress     = fdi_get_scan_progress();
         
         // Get all duplicates (from cache)
         $duplicates = fdi_get_duplicate_images_by_hash();
@@ -209,6 +212,27 @@ class Find_Duplicate_Images_By_Hash {
             wp_send_json_error( [ 'message' => 'Permission denied' ] );
         }
         
+        $resume = isset( $_POST['resume'] ) && $_POST['resume'] === 'true';
+        
+        // Check if we're resuming a stopped scan
+        if ( $resume ) {
+            $progress = fdi_get_scan_progress();
+            
+            if ( $progress && isset( $progress['processed'] ) ) {
+                // Resume from where we left off
+                fdi_set_scan_stopped( false );
+                
+                wp_send_json_success( [
+                    'total'     => $progress['total'],
+                    'processed' => $progress['processed'],
+                    'resuming'  => true,
+                    'message'   => 'Resuming scan'
+                ] );
+                return;
+            }
+        }
+        
+        // Start fresh scan
         // Clear existing cache and progress
         fdi_clear_cache();
         
@@ -223,8 +247,10 @@ class Find_Duplicate_Images_By_Hash {
         ] );
         
         wp_send_json_success( [
-            'total'   => $total,
-            'message' => 'Scan started'
+            'total'     => $total,
+            'processed' => 0,
+            'resuming'  => false,
+            'message'   => 'Scan started'
         ] );
     }
     
@@ -266,6 +292,10 @@ class Find_Duplicate_Images_By_Hash {
             // Save final results to cache
             fdi_set_cached_duplicates( $progress['duplicates'], 3600 * 24 ); // Cache for 24 hours
             fdi_set_last_scan_time();
+            fdi_set_scan_stopped( false ); // Mark as complete, not stopped
+        } else {
+            // Save partial results even if not complete
+            fdi_set_cached_duplicates( $progress['duplicates'], 3600 * 24 );
         }
         
         wp_send_json_success( [
@@ -275,6 +305,39 @@ class Find_Duplicate_Images_By_Hash {
             'duplicates'  => count( $progress['duplicates'] ),
             'percentage'  => round( ( $progress['processed'] / $progress['total'] ) * 100, 2 )
         ] );
+    }
+    
+    /**
+     * AJAX: Stop scan process
+     */
+    public function ajax_stop_scan() {
+        check_ajax_referer( 'fdi_ajax_nonce', 'nonce' );
+        
+        if ( !current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
+        
+        // Get current progress
+        $progress = fdi_get_scan_progress();
+        
+        if ( $progress ) {
+            // Save partial results to cache
+            if ( !empty( $progress['duplicates'] ) ) {
+                fdi_set_cached_duplicates( $progress['duplicates'], 3600 * 24 );
+            }
+            
+            // Mark scan as stopped
+            fdi_set_scan_stopped( true );
+            
+            wp_send_json_success( [
+                'message'    => 'Scan stopped',
+                'processed'  => $progress['processed'],
+                'total'      => $progress['total'],
+                'duplicates' => count( $progress['duplicates'] )
+            ] );
+        } else {
+            wp_send_json_error( [ 'message' => 'No scan in progress' ] );
+        }
     }
     
     /**

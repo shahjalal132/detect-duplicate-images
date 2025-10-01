@@ -31,6 +31,22 @@
     align-items: center;
 }
 
+#fdi-stop-scan {
+    background: #d63638;
+    border-color: #d63638;
+    color: #fff;
+}
+
+#fdi-stop-scan:hover {
+    background: #b32d2e;
+    border-color: #b32d2e;
+}
+
+#fdi-stop-scan:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 /* Progress Bar */
 #fdi-progress-container {
     background: #fff;

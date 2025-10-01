@@ -33,6 +33,23 @@ function fdi_clear_cache() {
     delete_transient( 'fdi_duplicate_images' );
     delete_transient( 'fdi_scan_progress' );
     delete_option( 'fdi_last_scan_time' );
+    delete_option( 'fdi_scan_stopped' );
+}
+
+/**
+ * Check if scan was stopped (partial results)
+ * 
+ * @return bool True if scan was stopped
+ */
+function fdi_is_scan_stopped() {
+    return get_option( 'fdi_scan_stopped', false );
+}
+
+/**
+ * Mark scan as stopped
+ */
+function fdi_set_scan_stopped( $stopped = true ) {
+    update_option( 'fdi_scan_stopped', $stopped );
 }
 
 /**

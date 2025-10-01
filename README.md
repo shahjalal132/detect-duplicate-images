@@ -7,11 +7,13 @@ A high-performance WordPress plugin to scan the Media Library and find duplicate
 - 🔍 **Smart Scanning** - MD5 hash-based duplicate detection
 - ⚡ **High Performance** - Batch processing for millions of images
 - 💾 **Intelligent Caching** - Results cached for 24 hours
+- ⏸️ **Stop & Resume** - Pause scan anytime and resume later
 - 📊 **Beautiful Statistics Dashboard**
 - 🏷️ **Orphan Detection** - Identify unused vs attached images
 - 🗑️ **Safe Bulk Delete** - Only delete orphaned duplicates
 - 📄 **Pagination** - Handle thousands of duplicate sets
 - 📈 **Real-time Progress** - Visual progress bar during scanning
+- 💾 **Partial Results** - View duplicates found even if scan is stopped
 - ✨ **Modern UI** - Clean, intuitive interface
 
 ## Performance Optimizations
@@ -139,6 +141,14 @@ The scan runs in the background with real-time progress updates.
 - Click **"🔄 Re-scan Library"** to update results
 - Click **"Clear Cache"** to force a new scan
 
+### Stop & Resume Feature
+- Click **"⏸️ Stop Scan"** at any time during scanning
+- Partial results are automatically saved
+- View duplicates found so far immediately
+- Click **"▶️ Resume Scan"** to continue from where you stopped
+- Already scanned images are skipped (uses cached MD5 hashes)
+- Perfect for very large libraries or if you need to free up resources
+
 ### Deleting Duplicates
 1. Review the duplicate sets
 2. Check which images are "Orphans" (not attached)
@@ -228,6 +238,14 @@ const PER_PAGE = 20;
 - IE11: ⚠️ Not supported
 
 ## Version History
+
+- **1.5** - Stop & Resume functionality
+  - Added stop scan button
+  - Partial results display
+  - Resume from last position
+  - Smart hash caching (skips already scanned images)
+  - Improved progress tracking
+  - Better UX for interrupted scans
 
 - **1.4** - Performance optimization for large libraries
   - Added batch processing with AJAX
